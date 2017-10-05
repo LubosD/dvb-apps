@@ -36,8 +36,17 @@
 #include <sys/time.h>
 
 #include <libdvbapi/dvbfe.h>
+#include <linux/dvb/version.h>
+#include <linux/dvb/frontend.h>
+#include <stdbool.h>
 
 #define FE_STATUS_PARAMS (DVBFE_INFO_LOCKSTATUS|DVBFE_INFO_SIGNAL_STRENGTH|DVBFE_INFO_BER|DVBFE_INFO_SNR|DVBFE_INFO_UNCORRECTED_BLOCKS)
+
+
+#define DVB_VER_INT(maj,min) (((maj) << 16) + (min))
+
+#define DVB_VER_ATLEAST(maj, min) \
+ (DVB_VER_INT(DVB_API_VERSION,  DVB_API_VERSION_MINOR) >= DVB_VER_INT(maj, min))
 
 static char *usage_str =
     "\nusage: femon [options]\n"
@@ -60,6 +69,30 @@ static void usage(void)
 	exit(1);
 }
 
+#if DVB_VER_ATLEAST(5, 10)
+static bool printparam(const struct dtv_property* prop)
+{
+	switch (prop->u.st.stat[0].scale)
+	{
+		case FE_SCALE_DECIBEL:
+			printf("%.1f dB", prop->u.st.stat[0].svalue / 1000.f);
+			break;
+		case FE_SCALE_RELATIVE:
+			printf("%3llu%%", (prop->u.st.stat[0].uvalue * 100) / 0xffff);
+			break;
+		case FE_SCALE_COUNTER:
+			printf("%llu", prop->u.st.stat[0].uvalue);
+			break;
+		case FE_SCALE_NOT_AVAILABLE:
+		default:
+			return false;
+	}
+
+	return true;
+}
+#else
+#warning DVB API not 5.10 or higher
+#endif
 
 static
 int check_frontend (struct dvbfe_handle *fe, int human_readable, unsigned int count)
@@ -94,18 +127,62 @@ int check_frontend (struct dvbfe_handle *fe, int human_readable, unsigned int co
 		}
 
 
-
 		if (human_readable) {
-                       printf ("status %c%c%c%c%c | signal %3u%% | snr %3u%% | ber %d | unc %d | ",
+#if DVB_VER_ATLEAST(5, 10)
+			struct dtv_property fe_props[4];
+			struct dtv_properties dtv_props;
+
+			memset(fe_props, 0, sizeof(fe_props));
+
+			fe_props[0].cmd = DTV_STAT_SIGNAL_STRENGTH;
+			fe_props[1].cmd = DTV_STAT_PRE_ERROR_BIT_COUNT;
+			fe_props[2].cmd = DTV_STAT_CNR;
+			fe_props[3].cmd = DTV_STAT_ERROR_BLOCK_COUNT;
+
+			dtv_props.num = sizeof(fe_props) / sizeof(fe_props[0]);
+			dtv_props.props = fe_props;
+#endif
+				   printf ("status %c%c%c%c%c | ",
 				fe_info.signal ? 'S' : ' ',
 				fe_info.carrier ? 'C' : ' ',
 				fe_info.viterbi ? 'V' : ' ',
 				fe_info.sync ? 'Y' : ' ',
-				fe_info.lock ? 'L' : ' ',
-				(fe_info.signal_strength * 100) / 0xffff,
-				(fe_info.snr * 100) / 0xffff,
-				fe_info.ber,
-				fe_info.ucblocks);
+				fe_info.lock ? 'L' : ' ');
+
+#if DVB_VER_ATLEAST(5, 10)
+			int fd = dvbfe_get_pollfd(fe);
+			if (ioctl(fd, FE_GET_PROPERTY, &dtv_props) != 0) {
+#endif
+
+				printf ("signal %3u%% | snr %3u%% | ber %d | unc %d | ",
+					(fe_info.signal_strength * 100) / 0xffff,
+					(fe_info.snr * 100) / 0xffff,
+					fe_info.ber,
+					fe_info.ucblocks);
+#if DVB_VER_ATLEAST(5, 10)
+			} else {
+				printf ("signal ");
+				if (!printparam (&fe_props[0]))
+					printf( "%3u%%", (fe_info.signal_strength * 100) / 0xffff);
+				printf (" | ");
+				
+				printf ("snr ");
+				if (!printparam (&fe_props[2]))
+					printf ("%3u%%", (fe_info.snr * 100) / 0xffff);
+				printf (" | ");
+
+				printf ("ber ");
+				if (!printparam (&fe_props[1]))
+					printf ("%d", fe_info.ber);
+				printf (" | ");
+
+				printf ("unc ");
+				if (!printparam (&fe_props[3]))
+					printf ("%d", fe_info.ucblocks);
+				printf (" | ");
+			}
+#endif
+
 		} else {
 			printf ("status %c%c%c%c%c | signal %04x | snr %04x | ber %08x | unc %08x | ",
 				fe_info.signal ? 'S' : ' ',
